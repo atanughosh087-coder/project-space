@@ -4,9 +4,10 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { Particles } from './particles.js';
 import { buildRocket, buildPad, buildDebris, PAD_TOP } from './rocket.js';
-import { createSky, createStars, createEarth, createGround, createClouds, SUN } from './environment.js';
+import { createSky, createStars, createEarth, createGround, createCloudDeck, createConcrete, createHills, SUN, SUN_LOW, SUN_HIGH, CLOUD_H } from './environment.js';
 
 history.scrollRestoration = 'manual';
 window.scrollTo(0, 0);
@@ -47,30 +48,52 @@ const canvas = $('stage');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
 const DPR = Math.min(window.devicePixelRatio || 1, 1.75);
 renderer.setPixelRatio(DPR);
-renderer.toneMapping = THREE.NoToneMapping; // applied by OutputPass
+renderer.toneMapping = THREE.ACESFilmicToneMapping; // applied by OutputPass
+renderer.toneMappingExposure = 0.95;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(38, 1, 1, 100000);
 scene.fog = new THREE.FogExp2(0xffb48a, 0.0009);
 
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.5, 0.6, 1.0);
+const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.35, 0.55, 1.0);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
+const film = new ShaderPass({
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uAspect: { value: 1 } },
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform sampler2D tDiffuse; uniform float uTime; uniform float uAspect; varying vec2 vUv;
+    float rnd(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233)) + uTime) * 43758.5453); }
+    void main(){
+      vec2 c = vUv - 0.5;
+      float r2 = dot(c * vec2(uAspect, 1.0), c * vec2(uAspect, 1.0));
+      vec2 off = c * r2 * 0.006;                       // lens fringing
+      vec3 col = vec3(texture2D(tDiffuse, vUv + off).r, texture2D(tDiffuse, vUv).g, texture2D(tDiffuse, vUv - off).b);
+      col *= 1.0 - smoothstep(0.15, 0.85, r2) * 0.4;   // vignette
+      col += (rnd(vUv * 900.0) - 0.5) * 0.035;          // film grain
+      gl_FragColor = vec4(col, 1.0);
+    }`,
+});
+composer.addPass(film);
 
 /* ---------- world ---------- */
 const sky = createSky(); scene.add(sky);
 const stars = createStars(); scene.add(stars);
-const { group: earthGroup, earthMat } = createEarth(); scene.add(earthGroup);
+const { group: earthGroup, earthMat, atmoMat } = createEarth(); scene.add(earthGroup);
 const ground = createGround(); scene.add(ground);
-const { group: padGroup, arm } = buildPad(); scene.add(padGroup);
-const xAtY = (y) => { for (let i = 1; i <= N; i++) if (path[i][1] >= y) return path[i][0]; return path[N][0]; };
-const clouds = createClouds(xAtY); scene.add(clouds.group);
-
-const sunLight = new THREE.DirectionalLight(0xffe2c4, 2.4);
-sunLight.position.copy(SUN).multiplyScalar(500);
-scene.add(sunLight);
-const hemi = new THREE.HemisphereLight(0x8fb4ff, 0x3a3226, 0.9);
+const hills = createHills(); hills.material.transparent = true; scene.add(hills);
+const deck = createCloudDeck(); scene.add(deck);
+const { group: padGroup, arm, glow } = buildPad(createConcrete()); scene.add(padGroup);
+const sunLight = new THREE.DirectionalLight(0xffb070, 3);
+sunLight.target.position.set(0, 40, 0);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(4096, 4096);
+Object.assign(sunLight.shadow.camera, { left: -240, right: 240, top: 240, bottom: -240, near: 1, far: 1200 });
+sunLight.shadow.bias = -0.0004; sunLight.shadow.normalBias = 0.15;
+scene.add(sunLight, sunLight.target);
+const hemi = new THREE.HemisphereLight(0x8fb4ff, 0x3a3226, 0.25);
 scene.add(hemi);
 
 const rocket = buildRocket();
@@ -102,6 +125,16 @@ const ring = new THREE.Mesh(new THREE.RingGeometry(0.92, 1, 96),
 blast.add(ring);
 const debris = buildDebris(); blast.add(debris);
 
+// image-based light from the golden-hour sky so metal/clearcoat have something real to reflect
+{
+  const envScene = new THREE.Scene();
+  const envSky = createSky();
+  envScene.add(envSky);
+  const pm = new THREE.PMREMGenerator(renderer);
+  scene.environment = pm.fromScene(envScene, 0.02).texture;
+  envSky.geometry.dispose(); envSky.material.dispose();
+}
+
 /* ---------- sizing ---------- */
 let baseFov = 38, stageH = 720;
 const pointUniforms = [fire.uniforms, smoke.uniforms, debris.material.uniforms];
@@ -114,15 +147,16 @@ function resize() {
   baseFov = w / h < 1 ? mix(38, 62, clamp01((1 - w / h) / 0.6)) : 38;
   stageH = h;
   stars.material.uniforms.uPx.value = DPR;
+  film.uniforms.uAspect.value = w / h;
 }
 window.addEventListener('resize', resize);
 resize();
 
-/* ---------- colour ramps for sky vs altitude ---------- */
+/* ---------- colour ramps for haze vs altitude ---------- */
 const C = (h) => new THREE.Color(h);
-const topDay = C(0x1d5fc0), topSpace = C(0x000104);
-const horWarm = C(0xffb78c), horDay = C(0x8cc4ff);
+const hazeGold = C(0xe8a98c), hazeDay = C(0x9cc2ee), cloudGrey = C(0xc9ccd6);
 const tmp = new THREE.Color();
+const goldLight = C(0xffb070), whiteLight = C(0xfff4e6);
 
 /* ---------- scroll state ---------- */
 let target = 0, p = 0, started = false;
@@ -191,7 +225,7 @@ function frame() {
   rocket.root.position.z += (Math.random() - 0.5) * shake;
   rocket.root.visible = p < T.blast + 0.003;
   rocket.setThrust(thrust, time);
-  arm.rotation.y = smooth(T.liftoff - 0.015, T.liftoff + 0.02, p) * 1.25;
+  arm.rotation.y = -smooth(T.liftoff - 0.015, T.liftoff + 0.02, p) * 1.25;
   arm.scale.setScalar(1);
 
   nozzle.set(0, -1, 0).applyAxisAngle(new THREE.Vector3(0, 0, 1), th).add(rocket.root.position);
@@ -200,22 +234,34 @@ function frame() {
   /* sky / atmosphere state */
   const a = clamp01(ry / 3800);
   const spaceF = smooth(0.2, 0.65, a);
+  SUN.copy(SUN_LOW).lerp(SUN_HIGH, smooth(0.04, 0.6, a)).normalize();
+  for (const u of [sky.material.uniforms, deck.material.uniforms, earthMat.uniforms, atmoMat.uniforms]) u.uSun.value.copy(SUN);
   sky.material.uniforms.uSpace.value = spaceF;
-  tmp.copy(horWarm).lerp(horDay, smooth(0, 0.14, a)).lerp(C(0x000000), smooth(0.22, 0.6, a));
-  sky.material.uniforms.uHorizon.value.copy(tmp);
-  scene.fog.color.copy(tmp).lerp(C(0xdde8ff), 0.15);
-  scene.fog.density = 0.00085 * (1 - smooth(0.02, 0.2, a));
-  sky.material.uniforms.uTop.value.copy(topDay).lerp(topSpace, smooth(0.15, 0.6, a));
+  sunLight.position.copy(SUN).multiplyScalar(600).add(sunLight.target.position);
+  sunLight.color.copy(goldLight).lerp(whiteLight, smooth(0.02, 0.4, a));
+  sunLight.intensity = mix(3.4, 4.6, spaceF);
+  sunLight.castShadow = ry < 260;
+  hemi.intensity = mix(0.25, 0.08, spaceF);
+  scene.environmentIntensity = mix(1.6, 0.12, spaceF);
+  renderer.toneMappingExposure = mix(0.95, 1.05, spaceF);
+  tmp.copy(hazeGold).lerp(hazeDay, smooth(0.0, 0.2, a)).lerp(C(0x000000), smooth(0.25, 0.6, a));
+  const inCloud = Math.exp(-Math.pow((camera.position.y - CLOUD_H) / 160, 2));
+  scene.fog.color.copy(tmp).lerp(cloudGrey, inCloud * 0.85);
+  scene.fog.density = 0.0006 * (1 - smooth(0.0, 0.25, a)) + 0.0042 * inCloud;
+  deck.position.x = camera.position.x; deck.position.z = camera.position.z;
+  deck.material.uniforms.uCamY.value = camera.position.y;
+  deck.material.uniforms.uTime.value = time;
+  deck.material.uniforms.uAmt.value = 1 - smooth(2900, 4100, camera.position.y);
+  deck.material.uniforms.uHaze.value.copy(tmp).multiplyScalar(0.9);
+  deck.visible = deck.material.uniforms.uAmt.value > 0.01;
   stars.material.uniforms.uOpacity.value = smooth(0.3, 0.75, a);
   ground.material.opacity = 1 - smooth(0.1, 0.24, a);
   ground.visible = ground.material.opacity > 0.01;
-  const cloudFade = smooth(40, 320, ry) * (1 - smooth(0.4, 0.6, a));
-  clouds.materials.forEach((m) => (m.opacity = cloudFade));
-  clouds.group.visible = cloudFade > 0.01;
-  hemi.intensity = mix(0.9, 0.35, spaceF);
-  sunLight.intensity = mix(2.4, 2.6, spaceF);
+  hills.material.opacity = ground.material.opacity; hills.visible = ground.visible;
   earthMat.uniforms.uTime.value = time;
   padGroup.visible = ground.visible;
+  glow.material.opacity = thrust * (1 - smooth(20, 140, ry)) * 0.45;
+  film.uniforms.uTime.value = time % 10;
 
   /* camera rig */
   const kFollow = smooth(0.1, 0.24, p);
@@ -224,7 +270,7 @@ function frame() {
   const off = new THREE.Vector3(
     mix(mix(62, 46, kAsc), 80, kSpace),
     mix(mix(16, -2, kAsc), 85, kSpace),
-    mix(mix(108, 88, kAsc), 210, kSpace),
+    mix(mix(128, 92, kAsc), 210, kSpace),
   );
   const pull = 1 + smooth(T.blast, T.blast + 0.08, p) * 0.45;
   off.multiplyScalar(pull);
@@ -237,10 +283,14 @@ function frame() {
   const bShake = Math.exp(-Math.pow((p - (T.blast + 0.008)) / 0.012, 2)) * 1.6;
   camPos.x += (Math.random() - 0.5) * (rumble + bShake);
   camPos.y += (Math.random() - 0.5) * (rumble + bShake);
-  camera.fov = baseFov + 14 * kSpace;
+  camera.fov = baseFov - 4 * (1 - kAsc) + 14 * kSpace;
   camera.updateProjectionMatrix();
   const pxScale = (stageH * DPR) / (2 * Math.tan((camera.fov * Math.PI) / 360));
   pointUniforms.forEach((u) => (u.uScale.value = pxScale));
+  // slow handheld-style drift so the frame feels operated, not rendered
+  const sway = 1 - kSpace * 0.6;
+  camPos.x += Math.sin(time * 0.37) * 0.35 * sway;
+  camPos.y += Math.sin(time * 0.53 + 1.3) * 0.25 * sway;
   camera.position.copy(camPos);
   camera.lookAt(camLook);
   sky.position.copy(camera.position);
@@ -323,7 +373,7 @@ function frame() {
     updateHud(alt, 7800 * Math.pow(u, 1.15));
   }
 
-  bloom.strength = mix(0.5, 0.4, spaceF);
+  bloom.strength = mix(0.35, 0.3, spaceF);
   composer.render();
 }
 

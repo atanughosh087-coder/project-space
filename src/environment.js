@@ -1,8 +1,10 @@
 import * as THREE from 'three';
 
 export const EARTH_R = 20000;
-export const SUN = new THREE.Vector3(0.55, 0.32, 0.77).normalize(); // key light, from the camera side
-export const BACKLIGHT = new THREE.Vector3(-0.55, 0.14, -0.82).normalize(); // low sun glowing behind the rocket
+// Golden-hour sun low on the left, lighting the rocket side-on; it climbs as the rocket leaves the atmosphere.
+export const SUN_LOW = new THREE.Vector3(-0.9, 0.22, 0.12).normalize();
+export const SUN_HIGH = new THREE.Vector3(-0.35, 0.7, 0.55).normalize();
+export const SUN = SUN_LOW.clone();
 
 const noiseGLSL = /* glsl */ `
   float hash(vec3 p){ p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
@@ -17,26 +19,83 @@ const noiseGLSL = /* glsl */ `
 export function createSky() {
   const mat = new THREE.ShaderMaterial({
     side: THREE.BackSide, depthWrite: false, depthTest: false,
-    uniforms: {
-      uTop: { value: new THREE.Color() }, uHorizon: { value: new THREE.Color() },
-      uSun: { value: BACKLIGHT.clone() }, uSpace: { value: 0 },
-    },
+    uniforms: { uSun: { value: SUN.clone() }, uSpace: { value: 0 } },
     vertexShader: `varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
     fragmentShader: /* glsl */ `
-      uniform vec3 uTop, uHorizon, uSun; uniform float uSpace; varying vec3 vDir;
+      uniform vec3 uSun; uniform float uSpace; varying vec3 vDir;
       void main(){
         vec3 d = normalize(vDir);
-        float h = clamp(d.y, 0.0, 1.0);
-        vec3 col = mix(uHorizon, uTop, pow(h, 0.5));
-        float s = max(dot(d, uSun), 0.0);
-        col += vec3(1.0, 0.55, 0.25) * pow(s, 5.0) * 0.5 * (1.0 - uSpace);
-        col += vec3(1.0, 0.85, 0.6) * pow(s, 90.0) * 0.5 * (1.0 - uSpace);
-        col += vec3(2.5, 2.2, 1.8) * pow(s, 1500.0) * 0.55;
+        float sd = max(dot(d, uSun), 0.0);
+        float low = 1.0 - smoothstep(0.08, 0.55, uSun.y);       // how "golden" the light is
+        float e = clamp(d.y, 0.0, 1.0);
+        vec3 zenith = mix(vec3(0.035, 0.1, 0.3), vec3(0.05, 0.19, 0.5), 1.0 - low);
+        vec3 horizAway = mix(vec3(0.62, 0.7, 0.9), vec3(0.45, 0.62, 0.95), 1.0 - low);
+        vec3 horizSun = mix(vec3(0.7, 0.8, 1.0), vec3(1.7, 0.72, 0.28), low);
+        vec3 horiz = mix(horizAway, horizSun, pow(sd, 1.6));
+        float haze = pow(1.0 - e, 3.5);
+        vec3 col = mix(zenith, horiz, pow(1.0 - e, 2.2) * 0.9 + haze * 0.1);
+        col += vec3(1.0, 0.55, 0.22) * pow(sd, 7.0) * 0.55 * low;             // aureole
+        col += vec3(1.0, 0.8, 0.55) * pow(sd, 48.0) * 0.9;                     // halo
+        col += vec3(3.0, 2.5, 1.9) * smoothstep(0.99955, 0.9999, sd) * 2.0;    // disc
+        col = mix(col, horiz * 0.35, smoothstep(0.0, -0.25, d.y));            // below the horizon
+        col *= 1.0 - uSpace;
+        col += vec3(1.0, 0.95, 0.85) * smoothstep(0.9995, 0.99985, sd) * uSpace * 3.0;
         gl_FragColor = vec4(col, 1.0);
       }`,
   });
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(50000, 32, 16), mat);
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(50000, 48, 24), mat);
   mesh.renderOrder = -10;
+  mesh.frustumCulled = false;
+  return mesh;
+}
+
+export const CLOUD_H = 1800;
+export function createCloudDeck() {
+  const mat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, side: THREE.DoubleSide,
+    uniforms: {
+      uSun: { value: SUN.clone() }, uCamY: { value: 0 }, uTime: { value: 0 }, uAmt: { value: 1 },
+      uHaze: { value: new THREE.Color(0.9, 0.6, 0.5) },
+    },
+    vertexShader: `varying vec3 vW; void main(){ vec4 w = modelMatrix * vec4(position, 1.0); float r2 = min(dot(w.xz, w.xz), ${(EARTH_R*0.97)**2}.0); w.y -= ${EARTH_R}.0 - sqrt(${EARTH_R*EARTH_R}.0 - r2); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uSun; uniform vec3 uHaze; uniform float uCamY, uTime, uAmt; varying vec3 vW;
+      ${noiseGLSL.replace(/vec3/g, 'vec3')}
+      float h2(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float n2(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(h2(i), h2(i + vec2(1,0)), f.x), mix(h2(i + vec2(0,1)), h2(i + vec2(1,1)), f.x), f.y); }
+      float f2(vec2 p){ float a = 0.5, s = 0.0; for (int i = 0; i < 6; i++) { s += a * n2(p); p = p * 2.07 + vec2(1.7, 9.2); a *= 0.5; } return s; }
+      void main(){
+        vec3 toCam = cameraPosition - vW;
+        float dist = length(toCam);
+        vec2 uv = vW.xz * 0.00042 + vec2(uTime * 0.004, uTime * 0.0015);
+        float warp = f2(uv * 0.7 + 4.0);
+        uv += (warp - 0.5) * 0.9;
+        float d = f2(uv);
+        float cover = smoothstep(0.46, 0.72, d);
+        vec2 sxz = normalize(uSun.xz + 1e-4);
+        float d2 = f2(uv + sxz * 0.018);
+        float lit = clamp(0.55 + (d - d2) * 7.0, 0.0, 1.0);
+        float low = 1.0 - smoothstep(0.08, 0.55, uSun.y);
+        vec3 sunTint = mix(vec3(1.35, 1.3, 1.25), vec3(1.9, 1.0, 0.55), low);
+        vec3 shade = mix(vec3(0.36, 0.4, 0.56), vec3(0.5, 0.42, 0.5), low);
+        bool below = uCamY < 1800.0;
+        vec3 col;
+        if (below) {
+          col = mix(shade * 0.75, sunTint * 0.85, lit * 0.8) * (1.0 - 0.45 * smoothstep(0.55, 0.9, d));
+        } else {
+          col = mix(shade * 1.3, sunTint * 1.15, lit);
+        }
+        float haze = smoothstep(2500.0, 26000.0, dist);
+        col = mix(col, uHaze, haze * 0.75);
+        float a = cover * (1.0 - smoothstep(16000.0, 38000.0, dist)) * smoothstep(0.0, 140.0, abs(uCamY - 1800.0));
+        gl_FragColor = vec4(col, a * uAmt);
+      }`,
+  });
+  const mesh = new THREE.Mesh(new THREE.RingGeometry(0.01, 38000, 96, 64), mat);
+  mesh.rotation.x = -Math.PI / 2;
+  mesh.position.y = CLOUD_H;
+  mesh.renderOrder = -5;
   mesh.frustumCulled = false;
   return mesh;
 }
@@ -128,83 +187,83 @@ export function createEarth() {
   atmo.frustumCulled = false;
   atmo.renderOrder = 1;
   group.add(atmo);
-  return { group, earthMat };
+  return { group, earthMat, atmoMat };
 }
 
 export function createGround() {
-  const c = document.createElement('canvas');
-  c.width = c.height = 256;
-  const g = c.getContext('2d');
-  g.fillStyle = '#474c3b';
-  g.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 2600; i++) {
-    const v = 50 + Math.random() * 50;
-    g.fillStyle = `rgba(${v + 10},${v + 14},${v - 6},0.35)`;
-    g.fillRect(Math.random() * 256, Math.random() * 256, 1 + Math.random() * 3, 1 + Math.random() * 3);
-  }
-  const tex = new THREE.CanvasTexture(c);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(400, 400);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 8;
-  const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 1, transparent: true });
+  const mk = (size, draw) => {
+    const c = document.createElement('canvas'); c.width = c.height = size;
+    draw(c.getContext('2d'), size);
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 8; t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  // scrubby coastal grass: layered blotches + fine speckle
+  const tex = mk(512, (g, s) => {
+    g.fillStyle = '#4a4c30'; g.fillRect(0, 0, s, s);
+    for (let i = 0; i < 260; i++) {
+      const r = rnd(20, 90), x = rnd(0, s), y = rnd(0, s), l = rnd(30, 62);
+      const gr = g.createRadialGradient(x, y, 0, x, y, r);
+      const hue = rnd(55, 95);
+      gr.addColorStop(0, `hsla(${hue},30%,${l}%,0.28)`); gr.addColorStop(1, `hsla(${hue},30%,${l}%,0)`);
+      g.fillStyle = gr; g.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    for (let i = 0; i < 9000; i++) {
+      const l = rnd(18, 52);
+      g.fillStyle = `hsla(${rnd(50, 100)},30%,${l}%,0.5)`;
+      g.fillRect(rnd(0, s), rnd(0, s), rnd(1, 2.5), rnd(1, 4));
+    }
+  });
+  tex.repeat.set(180, 180);
+  const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 1, metalness: 0, transparent: true });
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(40000, 40000), mat);
   mesh.rotation.x = -Math.PI / 2;
+  mesh.receiveShadow = true;
   return mesh;
 }
 
-function puffTexture() {
-  const s = 256;
-  const c = document.createElement('canvas');
-  c.width = c.height = s;
+export function createConcrete() {
+  const c = document.createElement('canvas'); c.width = c.height = 1024;
   const g = c.getContext('2d');
-  for (let i = 0; i < 26; i++) {
-    const a = Math.random() * Math.PI * 2;
-    const r = Math.random() * s * 0.2;
-    const x = s / 2 + Math.cos(a) * r * 1.3;
-    const y = s / 2 + Math.sin(a) * r * 0.8 + 6;
-    const rad = s * (0.1 + Math.random() * 0.12);
-    const grd = g.createRadialGradient(x, y, 0, x, y, rad);
-    grd.addColorStop(0, 'rgba(255,255,255,0.85)');
-    grd.addColorStop(0.5, 'rgba(255,255,255,0.45)');
-    grd.addColorStop(0.8, 'rgba(255,255,255,0.1)');
-    grd.addColorStop(1, 'rgba(255,255,255,0)');
-    g.fillStyle = grd;
-    g.fillRect(0, 0, s, s);
+  g.fillStyle = '#7b7c7c'; g.fillRect(0, 0, 1024, 1024);
+  for (let i = 0; i < 120; i++) { // stains
+    const x = Math.random() * 1024, y = Math.random() * 1024, r = 30 + Math.random() * 140;
+    const gr = g.createRadialGradient(x, y, 0, x, y, r);
+    const dark = Math.random() < 0.7;
+    gr.addColorStop(0, dark ? 'rgba(40,38,35,0.22)' : 'rgba(210,205,195,0.14)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = gr; g.fillRect(x - r, y - r, r * 2, r * 2);
   }
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
+  for (let i = 0; i < 26000; i++) {
+    const v = 90 + Math.random() * 80;
+    g.fillStyle = `rgba(${v},${v},${v - 4},0.35)`; g.fillRect(Math.random() * 1024, Math.random() * 1024, 1 + Math.random() * 2, 1 + Math.random() * 2);
+  }
+  g.strokeStyle = 'rgba(25,25,25,0.7)'; g.lineWidth = 3; // expansion joints
+  for (let i = 0; i <= 4; i++) { g.beginPath(); g.moveTo(i * 256, 0); g.lineTo(i * 256, 1024); g.stroke(); g.beginPath(); g.moveTo(0, i * 256); g.lineTo(1024, i * 256); g.stroke(); }
+  g.strokeStyle = 'rgba(30,30,30,0.5)'; g.lineWidth = 1.2;
+  for (let i = 0; i < 18; i++) { // cracks
+    let x = Math.random() * 1024, y = Math.random() * 1024; g.beginPath(); g.moveTo(x, y);
+    for (let k = 0; k < 8; k++) { x += (Math.random() - 0.5) * 50; y += (Math.random() - 0.5) * 50; g.lineTo(x, y); } g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 8; t.colorSpace = THREE.SRGBColorSpace;
   return t;
 }
 
-export function createClouds(xAtY) {
-  const group = new THREE.Group();
-  const tex = puffTexture();
-  const mat = new THREE.SpriteMaterial({ map: tex, color: 0xfff0e4, transparent: true, depthWrite: false, fog: false, opacity: 1 });
-  const shade = new THREE.SpriteMaterial({ map: tex, color: 0x9fb0d4, transparent: true, depthWrite: false, fog: false, opacity: 1 });
-  const add = (x, y, z, s, m) => {
-    const sp = new THREE.Sprite(m);
-    sp.position.set(x, y, z);
-    sp.scale.set(s, s * 0.62, 1);
-    sp.material.rotation = 0;
-    group.add(sp);
-  };
-  // sea of clouds below the climb
-  for (let i = 0; i < 160; i++) {
-    const a = Math.random() * Math.PI * 2, r = 900 + Math.sqrt(Math.random()) * 5500;
-    const s = 500 + Math.random() * 900;
-    add(Math.cos(a) * r, 160 + Math.random() * 120, Math.sin(a) * r, s, i % 3 ? shade : mat);
-    add(Math.cos(a) * r, 220 + Math.random() * 140, Math.sin(a) * r, s * 0.8, mat);
+/** Low rolling hills ringing the horizon so the sunset has something to sit behind. */
+export function createHills() {
+  const geo = new THREE.RingGeometry(2600, 9000, 160, 6);
+  geo.rotateX(-Math.PI / 2);
+  const p = geo.attributes.position;
+  const ph = [Math.random() * 9, Math.random() * 9, Math.random() * 9];
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), z = p.getZ(i), a = Math.atan2(z, x), r = Math.hypot(x, z);
+    const k = Math.min(1, (r - 2600) / 2500);
+    let h = Math.sin(a * 3 + ph[0]) * 90 + Math.sin(a * 7 + ph[1]) * 55 + Math.sin(a * 17 + ph[2]) * 24 + Math.sin(a * 41) * 8;
+    h = (h + 150) * (0.35 + 0.65 * Math.min(1, (r - 2600) / 1800)) * (a > 0 ? 1 : 0.6) * Math.min(1, k * 1.5 + 0.2);
+    p.setY(i, Math.max(0, h) * (1 - Math.max(0, (r - 7500) / 1500) * 0.6));
   }
-  // banks the rocket flies past; kept clear of the rocket and camera lanes so they never white-out the view
-  for (let i = 0; i < 170; i++) {
-    const y = 260 + Math.random() * 1100;
-    const a = Math.random() * Math.PI * 2, r = 90 + Math.pow(Math.random(), 1.4) * 800;
-    const px = xAtY(y);
-    const x = px + Math.cos(a) * r, z = Math.sin(a) * r;
-    if (Math.hypot(x - (px + 50), z - 90) < 150) continue; // camera lane
-    const s = 90 + Math.random() * 300;
-    add(x, y, z, s, Math.random() < 0.3 ? shade : mat);
-  }
-  return { group, materials: [mat, shade] };
+  geo.computeVertexNormals();
+  const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x2c3a2a, roughness: 1 }));
+  m.position.y = -2;
+  return m;
 }

@@ -39,12 +39,72 @@ function flameMesh(radius, core) {
   return m;
 }
 
+
+function paintTexture(w, h, draw, repeatX = 1) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  t.wrapS = THREE.RepeatWrapping;
+  t.offset.x = 0.5; // canvas centre faces the camera (+z)
+  t.repeat.x = repeatX;
+  return t;
+}
+
+function stageTexture({ soot = 0, label = false, tall = 2048 }) {
+  return paintTexture(512, tall, (g, w, h) => {
+    g.fillStyle = '#eef0f3'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 9000; i++) { // paint grain
+      const v = 215 + Math.random() * 40;
+      g.fillStyle = `rgba(${v},${v},${v + 2},0.18)`; g.fillRect(Math.random() * w, Math.random() * h, 1 + Math.random() * 2, 1 + Math.random() * 3);
+    }
+    g.strokeStyle = 'rgba(70,75,85,0.35)'; g.lineWidth = 1.4; // panel seams
+    const seg = h / (tall > 1000 ? 8 : 3);
+    for (let y = seg; y < h; y += seg) { g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); }
+    g.strokeStyle = 'rgba(70,75,85,0.18)'; g.lineWidth = 1;
+    for (let x = 0; x < w; x += w / 6) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); }
+    for (let i = 0; i < 70; i++) { // rivets / small scuffs
+      g.fillStyle = 'rgba(90,95,105,0.25)'; g.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+    }
+    for (let i = 0; i < 40; i++) { // water / dirt streaks
+      const x = Math.random() * w, y = Math.random() * h * 0.85, l = 40 + Math.random() * 260;
+      const gr = g.createLinearGradient(0, y, 0, y + l);
+      gr.addColorStop(0, 'rgba(110,100,90,0.0)'); gr.addColorStop(0.3, 'rgba(110,100,90,0.10)'); gr.addColorStop(1, 'rgba(110,100,90,0)');
+      g.fillStyle = gr; g.fillRect(x, y, 2 + Math.random() * 4, l);
+    }
+    if (soot) { // engine soot, heaviest at the base
+      const gr = g.createLinearGradient(0, h, 0, h * (1 - soot));
+      gr.addColorStop(0, 'rgba(18,16,15,0.92)'); gr.addColorStop(0.55, 'rgba(40,36,33,0.35)'); gr.addColorStop(1, 'rgba(40,36,33,0)');
+      g.fillStyle = gr; g.fillRect(0, h * (1 - soot), w, h * soot);
+      for (let i = 0; i < 90; i++) {
+        const x = Math.random() * w, l = h * soot * (0.2 + Math.random() * 0.8);
+        const sg = g.createLinearGradient(0, h, 0, h - l);
+        sg.addColorStop(0, 'rgba(15,13,12,0.5)'); sg.addColorStop(1, 'rgba(15,13,12,0)');
+        g.fillStyle = sg; g.fillRect(x, h - l, 1 + Math.random() * 5, l);
+      }
+    }
+    if (label) {
+      g.save(); g.translate(w / 2, h * 0.52); g.rotate(-Math.PI / 2);
+      g.fillStyle = '#15171b'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.font = '700 64px "Space Grotesk", Arial, sans-serif';
+      g.fillText('P R O J E C T   S P A C E', 0, 0);
+      g.restore();
+      g.fillStyle = '#d8261b'; g.fillRect(w / 2 - 30, h * 0.52 - 700, 60, 8);
+    }
+  });
+}
+
 export function buildRocket() {
   const root = new THREE.Group(); // origin = engine base
-  const white = new THREE.MeshStandardMaterial({ color: 0xf1f3f7, metalness: 0.2, roughness: 0.4 });
-  const black = new THREE.MeshStandardMaterial({ color: 0x15171b, metalness: 0.4, roughness: 0.55 });
-  const steel = new THREE.MeshStandardMaterial({ color: 0x8b9099, metalness: 0.85, roughness: 0.32 });
-  const red = new THREE.MeshStandardMaterial({ color: 0xd8261b, metalness: 0.25, roughness: 0.35 });
+  const paint = (map) => new THREE.MeshPhysicalMaterial({ map, color: 0xffffff, metalness: 0.05, roughness: 0.46, clearcoat: 0.5, clearcoatRoughness: 0.28 });
+  const white = paint(stageTexture({ tall: 512 }));
+  const stage1 = paint(stageTexture({ soot: 0.2, label: true }));
+  const stage2 = paint(stageTexture({ tall: 1024 }));
+  const black = new THREE.MeshStandardMaterial({ color: 0x1b1d21, metalness: 0.5, roughness: 0.5 });
+  const steel = new THREE.MeshStandardMaterial({ color: 0x8b9099, metalness: 0.6, roughness: 0.5 });
+  const red = new THREE.MeshPhysicalMaterial({ color: 0xc9211a, metalness: 0.1, roughness: 0.35, clearcoat: 0.7, clearcoatRoughness: 0.2 });
   const r = 1.85;
 
   const cyl = (rt, rb, h, y, mat) => {
@@ -54,11 +114,11 @@ export function buildRocket() {
     return m;
   };
   cyl(1.6, 1.8, 3, 1.5, black); // engine skirt
-  cyl(r, r, 40, 23, white); // first stage
+  cyl(r, r, 40, 23, stage1); // first stage
   cyl(r + 0.02, r + 0.02, 1.2, 14, black); // stripe
   cyl(r + 0.02, r + 0.02, 0.5, 33, black);
   cyl(r, r, 4, 45, black); // interstage
-  cyl(r, r, 14, 54, white); // second stage
+  cyl(r, r, 14, 54, stage2); // second stage
 
   // fairing: ogive with red nose + white band, like the reference
   const pts = [];
@@ -103,6 +163,7 @@ export function buildRocket() {
   flame.position.y = -0.4;
   root.add(flame);
 
+  root.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   const light = new THREE.PointLight(0xff8a3c, 0, 320, 2);
   light.position.y = -3;
   root.add(light);
@@ -123,11 +184,12 @@ export function buildRocket() {
   };
 }
 
-export function buildPad() {
+export function buildPad(concreteTex) {
   const g = new THREE.Group();
-  const concrete = new THREE.MeshStandardMaterial({ color: 0x6f7378, roughness: 0.95 });
+  concreteTex.repeat.set(10, 10);
+  const concrete = new THREE.MeshStandardMaterial({ map: concreteTex, roughness: 0.92, bumpMap: concreteTex, bumpScale: 0.6 });
   const dark = new THREE.MeshStandardMaterial({ color: 0x1a1c20, roughness: 0.8, metalness: 0.3 });
-  const steel = new THREE.MeshStandardMaterial({ color: 0xa8adb5, roughness: 0.45, metalness: 0.75 });
+  const steel = new THREE.MeshStandardMaterial({ color: 0x9aa0a8, roughness: 0.55, metalness: 0.55 });
 
   const slab = new THREE.Mesh(new THREE.CylinderGeometry(70, 76, 0.4, 64), concrete);
   slab.position.y = 0.2;
@@ -139,9 +201,18 @@ export function buildPad() {
   trench.position.set(0, 0.45, 32);
   g.add(trench);
 
+  // blast glow thrown on the pad by the plume
+  const gc = document.createElement('canvas'); gc.width = gc.height = 128;
+  const gg = gc.getContext('2d'); const gr = gg.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, 'rgba(255,200,120,1)'); gr.addColorStop(0.35, 'rgba(255,120,40,0.45)'); gr.addColorStop(1, 'rgba(255,80,10,0)');
+  gg.fillStyle = gr; gg.fillRect(0, 0, 128, 128);
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(190, 190), new THREE.MeshBasicMaterial({
+    map: new THREE.CanvasTexture(gc), transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, fog: false, color: new THREE.Color(1.6, 1.2, 0.9) }));
+  glow.rotation.x = -Math.PI / 2; glow.position.y = 0.7; g.add(glow);
+
   // service tower
   const tower = new THREE.Group();
-  tower.position.set(-13, 0, -2);
+  tower.position.set(13, 0, -2);
   const W = 2.6, TH = 96;
   const col = new THREE.BoxGeometry(0.45, TH, 0.45);
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
@@ -180,14 +251,21 @@ export function buildPad() {
   const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.7, 12, 12), new THREE.MeshBasicMaterial({ color: new THREE.Color(4, 0.2, 0.1) }));
   beacon.position.y = TH + 16;
   tower.add(beacon);
+  // work platforms
+  for (const y of [24, 46, 68, 88]) {
+    const deck = new THREE.Mesh(new THREE.BoxGeometry(W * 2 + 3, 0.35, W * 2 + 3), steel);
+    deck.position.y = y; tower.add(deck);
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(W * 2 + 3, 1.0, 0.1), steel);
+    for (const sz of [-1, 1]) { const r2 = rail.clone(); r2.position.set(0, y + 0.7, sz * (W + 1.5)); tower.add(r2); }
+  }
   g.add(tower);
 
   // crew-access arm that swings clear at liftoff
   const arm = new THREE.Group();
-  arm.position.set(-13 + W, 52, -2);
+  arm.position.set(13 - W, 52, -2);
   const armBox = new THREE.Mesh(new THREE.BoxGeometry(1, 1.2, 2.2), steel);
   armBox.scale.x = 7;
-  armBox.position.x = 3.5;
+  armBox.position.x = -3.5;
   arm.add(armBox);
   g.add(arm);
 
@@ -208,7 +286,9 @@ export function buildPad() {
     t.position.set(x, s, z);
     g.add(t);
   }
-  return { group: g, arm };
+  g.traverse((o) => { if (o.isMesh && o !== glow) { o.castShadow = true; o.receiveShadow = true; } });
+  slab.castShadow = false;
+  return { group: g, arm, glow };
 }
 
 export function buildDebris() {
