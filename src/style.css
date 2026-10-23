@@ -10,7 +10,7 @@
 html, body { background: #02030a; color: var(--fg); font-family: var(--font); }
 body.locked { overflow: hidden; }
 #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
-#scroll-space { height: 800vh; pointer-events: none; }
+#scroll-space { height: 1000vh; pointer-events: none; }
 
 /* loader */
 #loader {

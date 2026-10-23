@@ -98,6 +98,9 @@ function stageTexture({ soot = 0, label = false, tall = 2048 }) {
 
 export function buildRocket() {
   const root = new THREE.Group(); // origin = engine base
+  const booster = new THREE.Group(); // stage 1 + interstage: falls away at separation
+  const upper = new THREE.Group(); // stage 2 + payload fairing
+  root.add(booster, upper);
   const paint = (map) => new THREE.MeshPhysicalMaterial({ map, color: 0xffffff, metalness: 0.05, roughness: 0.46, clearcoat: 0.5, clearcoatRoughness: 0.28 });
   const white = paint(stageTexture({ tall: 512 }));
   const stage1 = paint(stageTexture({ soot: 0.2, label: true }));
@@ -107,10 +110,10 @@ export function buildRocket() {
   const red = new THREE.MeshPhysicalMaterial({ color: 0xc9211a, metalness: 0.1, roughness: 0.35, clearcoat: 0.7, clearcoatRoughness: 0.2 });
   const r = 1.85;
 
-  const cyl = (rt, rb, h, y, mat) => {
+  const cyl = (rt, rb, h, y, mat, parent = booster) => {
     const m = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, 48), mat);
     m.position.y = y;
-    root.add(m);
+    parent.add(m);
     return m;
   };
   cyl(1.6, 1.8, 3, 1.5, black); // engine skirt
@@ -118,7 +121,7 @@ export function buildRocket() {
   cyl(r + 0.02, r + 0.02, 1.2, 14, black); // stripe
   cyl(r + 0.02, r + 0.02, 0.5, 33, black);
   cyl(r, r, 4, 45, black); // interstage
-  cyl(r, r, 14, 54, stage2); // second stage
+  cyl(r, r, 14, 54, stage2, upper); // second stage
 
   // fairing: ogive with red nose + white band, like the reference
   const pts = [];
@@ -128,10 +131,10 @@ export function buildRocket() {
     pts.push(new THREE.Vector2(Math.max(0.001, r * Math.sqrt(1 - Math.pow(t, 1.9))), h0 + t * H));
   }
   const fairing = new THREE.Mesh(new THREE.LatheGeometry(pts, 48), red);
-  root.add(fairing);
+  upper.add(fairing);
   const band = new THREE.Mesh(new THREE.CylinderGeometry(r + 0.03, r + 0.03, 1.4, 48), white);
   band.position.y = h0 + 0.7;
-  root.add(band);
+  upper.add(band);
 
   // grid fins & landing legs
   for (let i = 0; i < 4; i++) {
@@ -139,11 +142,11 @@ export function buildRocket() {
     const fin = new THREE.Mesh(new THREE.BoxGeometry(0.25, 3.2, 2.6), steel);
     fin.position.set(Math.cos(a) * (r + 1.2), 43, Math.sin(a) * (r + 1.2));
     fin.rotation.y = -a;
-    root.add(fin);
+    booster.add(fin);
     const leg = new THREE.Mesh(new THREE.BoxGeometry(0.5, 10, 0.7), black);
     leg.position.set(Math.cos(a) * (r + 0.7), 7, Math.sin(a) * (r + 0.7));
     leg.rotation.set(Math.sin(a) * 0.08, 0, -Math.cos(a) * 0.08);
-    root.add(leg);
+    booster.add(leg);
   }
   // engine bells
   const bellGeo = new THREE.CylinderGeometry(0.35, 0.6, 1.2, 16, 1, true);
@@ -152,7 +155,7 @@ export function buildRocket() {
     const rad = i === 8 ? 0 : 1.05;
     const b = new THREE.Mesh(bellGeo, steel);
     b.position.set(Math.cos(a) * rad, -0.2, Math.sin(a) * rad);
-    root.add(b);
+    booster.add(b);
   }
 
   // plume
@@ -161,15 +164,40 @@ export function buildRocket() {
   const flame = new THREE.Group();
   flame.add(outer, inner);
   flame.position.y = -0.4;
-  root.add(flame);
+  booster.add(flame);
+
+  // second-stage vacuum engine: wider, fainter, longer plume
+  const outer2 = flameMesh(2.4, 0), inner2 = flameMesh(0.8, 1);
+  const flame2 = new THREE.Group();
+  flame2.add(outer2, inner2);
+  flame2.position.y = 46.6;
+  flame2.visible = false;
+  upper.add(flame2);
+  const vac = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 1.5, 2.4, 24, 1, true), steel);
+  vac.position.y = 46.4; upper.add(vac);
 
   root.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
   const light = new THREE.PointLight(0xff8a3c, 0, 320, 2);
   light.position.y = -3;
-  root.add(light);
+  booster.add(light);
 
+  const bAxis = new THREE.Vector3();
   return {
-    root, flame, light,
+    root, flame, light, booster, upper,
+    /** sepT 0..1 drives the stage-separation animation; t2 is the second-stage thrust. */
+    separate(sepT, t2, time) {
+      const e = sepT * sepT;
+      booster.position.set(0, -e * 520, e * 40);
+      booster.rotation.set(sepT * 1.5, sepT * 0.4, sepT * 0.3);
+      booster.visible = sepT < 0.985;
+      upper.position.y = e * 28 + sepT * 6;
+      flame2.visible = t2 > 0.01;
+      const fl = 0.92 + 0.08 * Math.sin(time * 55);
+      outer2.scale.set(0.5 + 0.5 * t2, (14 + 60 * t2) * fl, 0.5 + 0.5 * t2);
+      inner2.scale.set(0.5 + 0.5 * t2, (7 + 30 * t2) * fl, 0.5 + 0.5 * t2);
+      for (const m of [outer2, inner2]) { m.material.uniforms.uTime.value = time; m.material.uniforms.uAmt.value = Math.min(1, t2 * 1.2) * 0.7; }
+      return bAxis.set(0, upper.position.y, 0);
+    },
     setThrust(t, time) {
       const flick = 0.92 + 0.08 * Math.sin(time * 60) + 0.05 * Math.sin(time * 37.3);
       flame.visible = t > 0.01;

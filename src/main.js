@@ -18,7 +18,7 @@ const smooth = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t
 const mix = (a, b, t) => a + (b - a) * t;
 
 /* ---------- timeline (all in scroll progress p: 0..1) ---------- */
-const T = { ignite: 0.02, liftoff: 0.07, coastEnd: 0.8, blast: 0.86, blastEnd: 0.96, card: 0.915 };
+const T = { ignite: 0.02, liftoff: 0.07, coastEnd: 0.8, blast: 0.9, blastEnd: 0.98, card: 0.945, sepStart: 0.62, sepEnd: 0.7 };
 const S_MAX = 4200;
 const climb = (p) => {
   const u = clamp01((p - T.liftoff) / (T.coastEnd - T.liftoff));
@@ -178,7 +178,8 @@ const phases = [
   [T.liftoff, 'Liftoff', 'Clearing the tower'],
   [0.3, 'Max-Q', 'Punching through the clouds'],
   [0.5, 'Atmosphere', 'The sky falls away'],
-  [0.7, 'Orbit', 'Above the Earth'],
+  [T.sepStart, 'Stage separation', 'Booster falls away'],
+  [0.72, 'Orbit', 'Above the Earth'],
   [T.blast - 0.004, 'Detonation', 'Mission event'],
 ];
 let lastPhase = -1;
@@ -201,7 +202,7 @@ let last = performance.now();
 let time = 0, hudTick = 0;
 const prevNozzle = new THREE.Vector3(), nozzle = new THREE.Vector3(), camPos = new THREE.Vector3(), camLook = new THREE.Vector3();
 const up = new THREE.Vector3(0, 1, 0);
-let havePrev = false;
+let havePrev = false, lastUpperOn = false, lastP = 0;
 
 function frame() {
   const now = performance.now();
@@ -224,12 +225,18 @@ function frame() {
   rocket.root.position.x += (Math.random() - 0.5) * shake;
   rocket.root.position.z += (Math.random() - 0.5) * shake;
   rocket.root.visible = p < T.blast + 0.003;
-  rocket.setThrust(thrust, time);
+  const sepT = smooth(T.sepStart, T.sepEnd, p);
+  const tBoost = thrust * (1 - smooth(T.sepStart - 0.012, T.sepStart, p));
+  const tUpper = thrust * smooth(T.sepStart + 0.012, T.sepStart + 0.05, p);
+  rocket.setThrust(tBoost, time);
+  rocket.separate(sepT, tUpper, time);
+  const upperOn = p >= T.sepStart;
+  const eng = upperOn ? tUpper : tBoost;
   arm.rotation.y = -smooth(T.liftoff - 0.015, T.liftoff + 0.02, p) * 1.25;
   arm.scale.setScalar(1);
 
-  nozzle.set(0, -1, 0).applyAxisAngle(new THREE.Vector3(0, 0, 1), th).add(rocket.root.position);
-  if (!havePrev) { prevNozzle.copy(nozzle); havePrev = true; }
+  nozzle.set(0, upperOn ? 46.4 + rocket.upper.position.y : -1, 0).applyAxisAngle(new THREE.Vector3(0, 0, 1), th).add(rocket.root.position);
+  if (!havePrev || upperOn !== lastUpperOn) { prevNozzle.copy(nozzle); havePrev = true; }
 
   /* sky / atmosphere state */
   const a = clamp01(ry / 3800);
@@ -237,6 +244,7 @@ function frame() {
   SUN.copy(SUN_LOW).lerp(SUN_HIGH, smooth(0.04, 0.6, a)).normalize();
   for (const u of [sky.material.uniforms, deck.material.uniforms, earthMat.uniforms, atmoMat.uniforms]) u.uSun.value.copy(SUN);
   sky.material.uniforms.uSpace.value = spaceF;
+  sky.material.uniforms.uStrat.value = smooth(0.12, 0.45, a);
   sunLight.position.copy(SUN).multiplyScalar(600).add(sunLight.target.position);
   sunLight.color.copy(goldLight).lerp(whiteLight, smooth(0.02, 0.4, a));
   sunLight.intensity = mix(3.4, 4.6, spaceF);
@@ -265,18 +273,23 @@ function frame() {
 
   /* camera rig */
   const kFollow = smooth(0.1, 0.24, p);
-  const kSpace = smooth(0.55, 0.84, p);
+  const kSpace = smooth(0.55, 0.88, p);
+  const kEarth = smooth(0.72, 0.9, p);
+  const sweep = smooth(0.58, 0.9, p) * 0.85;
   const kAsc = smooth(0.02, 0.35, p);
   const off = new THREE.Vector3(
     mix(mix(62, 46, kAsc), 80, kSpace),
     mix(mix(16, -2, kAsc), 85, kSpace),
     mix(mix(128, 92, kAsc), 210, kSpace),
   );
+  off.y += 45 * kEarth;
   const pull = 1 + smooth(T.blast, T.blast + 0.08, p) * 0.45;
   off.multiplyScalar(pull);
+  // orbit the camera round to the rocket's side as we leave the atmosphere
+  { const c = Math.cos(sweep), sn = Math.sin(sweep), ox = off.x, oz = off.z; off.x = ox * c + oz * sn; off.z = -ox * sn + oz * c; }
   const baseY = (PAD_TOP + ry) * kFollow;
   camPos.set(rx + off.x, baseY + off.y, off.z);
-  const lookY = mix(mix(38, PAD_TOP + ry + 20, smooth(0.09, 0.24, p)), PAD_TOP + ry + 6, kSpace);
+  const lookY = mix(mix(38, PAD_TOP + ry + 20, smooth(0.09, 0.24, p)), PAD_TOP + ry + 6 + 30 * sepT - 14 * kEarth, kSpace);
   camLook.set(rx, lookY, 0);
   // engine rumble felt in the camera
   const rumble = (thrust * (1 - liftT * 0.6) + smooth(0.5, 0.7, p) * 0.15) * 0.1 * (1 - kSpace * 0.7);
@@ -297,7 +310,7 @@ function frame() {
   stars.position.copy(camera.position);
 
   /* exhaust & smoke */
-  const spawnN = thrust * dt * 420;
+  const spawnN = eng * dt * 420;
   const nSpawn = Math.floor(spawnN + Math.random());
   const ascending = p < T.blast;
   const down = new THREE.Vector3(0, -1, 0).applyAxisAngle(new THREE.Vector3(0, 0, 1), th);
@@ -313,7 +326,7 @@ function frame() {
     }
     // pad smoke while still low
     const low = 1 - smooth(60, 260, ry);
-    const nPad = Math.floor(thrust * low * dt * 120 + Math.random());
+    const nPad = Math.floor(tBoost * low * dt * 120 + Math.random());
     for (let i = 0; i < nPad; i++) {
       const ang = Math.random() * Math.PI * 2, sp = 14 + Math.random() * 44;
       smoke.spawn(Math.cos(ang) * 6, 1.5 + Math.random() * 3, Math.sin(ang) * 6,
@@ -321,13 +334,22 @@ function frame() {
     }
     // vapour trail in the lower atmosphere
     const trailK = 1 - smooth(0.25, 0.5, a);
-    const nTrail = Math.floor(thrust * trailK * liftT * dt * 70 + Math.random());
+    const nTrail = Math.floor(eng * trailK * liftT * dt * 70 + Math.random());
     for (let i = 0; i < nTrail; i++) {
       const f = Math.random();
       smoke.spawn(mix(prevNozzle.x, nozzle.x, f) + (Math.random() - 0.5) * 3, mix(prevNozzle.y, nozzle.y, f) - 4, (Math.random() - 0.5) * 3,
         (Math.random() - 0.5) * 6, (Math.random() - 0.5) * 3, (Math.random() - 0.5) * 6, 5 + Math.random() * 4, 3 + Math.random() * 3, 10 + Math.random() * 12);
     }
   }
+  lastUpperOn = upperOn;
+  if (lastP < T.sepStart && p >= T.sepStart) { // separation flash of sparks
+    const ox = rocket.root.position.x - Math.sin(th) * 47, oy = rocket.root.position.y + Math.cos(th) * 47;
+    for (let i = 0; i < 110; i++) {
+      const v = new THREE.Vector3().randomDirection().multiplyScalar(10 + Math.random() * 40);
+      fire.spawn(ox, oy, 0, v.x, v.y, v.z, 0.4 + Math.random() * 0.6, 0.5 + Math.random(), 1.5 + Math.random() * 3);
+    }
+  }
+  lastP = p;
   prevNozzle.copy(nozzle);
   fire.update(dt);
   smoke.update(dt);
@@ -336,7 +358,7 @@ function frame() {
   const bt = clamp01((p - T.blast) / (T.blastEnd - T.blast));
   blast.visible = p > T.blast - 0.002 && bt < 1;
   if (blast.visible) {
-    const origin = rocket.root.position.clone().add(up.clone().applyAxisAngle(new THREE.Vector3(0, 0, 1), th).multiplyScalar(34));
+    const origin = rocket.root.position.clone().add(up.clone().applyAxisAngle(new THREE.Vector3(0, 0, 1), th).multiplyScalar(60 + rocket.upper.position.y));
     blast.position.copy(origin);
     const e = 1 - Math.pow(1 - clamp01(bt * 1.4), 3);
     const R = 110 * e + 8;

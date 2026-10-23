@@ -19,10 +19,10 @@ const noiseGLSL = /* glsl */ `
 export function createSky() {
   const mat = new THREE.ShaderMaterial({
     side: THREE.BackSide, depthWrite: false, depthTest: false,
-    uniforms: { uSun: { value: SUN.clone() }, uSpace: { value: 0 } },
+    uniforms: { uSun: { value: SUN.clone() }, uSpace: { value: 0 }, uStrat: { value: 0 } },
     vertexShader: `varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
     fragmentShader: /* glsl */ `
-      uniform vec3 uSun; uniform float uSpace; varying vec3 vDir;
+      uniform vec3 uSun; uniform float uSpace; uniform float uStrat; varying vec3 vDir;
       void main(){
         vec3 d = normalize(vDir);
         float sd = max(dot(d, uSun), 0.0);
@@ -33,7 +33,9 @@ export function createSky() {
         vec3 horizSun = mix(vec3(0.7, 0.8, 1.0), vec3(1.7, 0.72, 0.28), low);
         vec3 horiz = mix(horizAway, horizSun, pow(sd, 1.6));
         float haze = pow(1.0 - e, 3.5);
-        vec3 col = mix(zenith, horiz, pow(1.0 - e, 2.2) * 0.9 + haze * 0.1);
+        zenith = mix(zenith, vec3(0.05, 0.02, 0.2), uStrat);                    // deep indigo as the air thins
+        horiz = mix(horiz, vec3(0.12, 0.2, 0.55) + vec3(0.9, 0.35, 0.12) * low * 0.4, uStrat);
+        vec3 col = mix(zenith, horiz, pow(1.0 - e, 2.2 + uStrat * 2.0) * 0.9 + haze * 0.1);
         col += vec3(1.0, 0.55, 0.22) * pow(sd, 7.0) * 0.55 * low;             // aureole
         col += vec3(1.0, 0.8, 0.55) * pow(sd, 48.0) * 0.9;                     // halo
         col += vec3(3.0, 2.5, 1.9) * smoothstep(0.99955, 0.9999, sd) * 2.0;    // disc
@@ -179,11 +181,12 @@ export function createEarth() {
         float rim = 1.0 - abs(dot(normalize(vN), V));
         float i = pow(rim, 4.0);
         float lit = smoothstep(-0.3, 0.4, dot(normalize(vN), uSun));
-        vec3 c = mix(vec3(0.15, 0.45, 1.0), vec3(0.6, 0.8, 1.0), pow(rim, 9.0)) * i * lit * 2.2;
+        vec3 c = mix(vec3(0.12, 0.4, 1.0), vec3(0.7, 0.85, 1.0), pow(rim, 9.0)) * i * lit * 2.2;
+        c += vec3(1.6, 0.55, 0.15) * pow(rim, 22.0) * lit * 1.4;
         gl_FragColor = vec4(c, i * lit);
       }`,
   });
-  const atmo = new THREE.Mesh(new THREE.SphereGeometry(EARTH_R * 1.022, 128, 96), atmoMat);
+  const atmo = new THREE.Mesh(new THREE.SphereGeometry(EARTH_R * 1.028, 128, 96), atmoMat);
   atmo.frustumCulled = false;
   atmo.renderOrder = 1;
   group.add(atmo);
